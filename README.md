@@ -1,7 +1,17 @@
-O seu caso (Saúde).
+## Caso
+Saúde.
 
-O seu envelope (B. Consórcio, 40 devs, 5 times).
+## Envelope
+B. Consórcio, 40 desenvolvedores em 5 times
 
-O nome dos integrantes do grupo.
+## Nomes:
+Guilherme Silveira Alvez
+Isabeely Letícia Horschutz
+Júlia Damária Lupi
+Marcos Roberto Mazzero Junior
+Maysa Gabrielle Rodrigues de Melo
 
-Um breve roteiro de como navegar pelas pastas.
+## Como Navegar
+
+Cada pasta está indexada com a sua respectiva fase
+
