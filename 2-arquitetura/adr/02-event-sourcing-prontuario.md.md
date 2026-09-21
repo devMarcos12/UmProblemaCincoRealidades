@@ -1,4 +1,4 @@
-# ADR 0002: utilizar event sourcing para o armazenamento do prontuário eletrônico
+# ADR 02: utilizar event sourcing para o armazenamento do prontuário eletrônico
 
 **Status:** aceito
 

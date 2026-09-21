@@ -1,4 +1,4 @@
-# ADR 0005: adotar operação local com sincronização assíncrona para UPAs offline
+# ADR 05: adotar operação local com sincronização assíncrona para UPAs offline
 
 **Status:** aceito
 

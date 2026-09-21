@@ -1,4 +1,4 @@
-# ADR 0003: implementar camada anticorrupção para a integração de leitos legado
+# ADR 03: implementar camada anticorrupção para a integração de leitos legado
 
 **Status:** aceito
 
