@@ -1,0 +1,31 @@
+=== SPIKE ADR 05: UPA OFFLINE + SINCRONIZACAO IDEMPOTENTE ===
+
+1) Internet indisponivel: a triagem continua localmente
+   salvo PAC-001 | risco=VERMELHO | id=b921487c-3868-5338-9934-f6fb573b1078
+   salvo PAC-002 | risco=AMARELO | id=2af45eb1-04a9-5746-af25-46bf99a0df32
+   pendentes locais: 2
+
+2) Tentativa ainda offline
+   PAC-001: aguardando rede
+   pendentes locais: 2
+   registros unicos na nuvem: 0
+
+3) Internet volta, mas o ACK do primeiro envio se perde
+   PAC-001: ACK perdido; continuará pendente
+   PAC-002: ACEITO
+   pendentes locais: 1
+   registros unicos na nuvem: 2
+
+4) Worker tenta novamente
+   PAC-001: DUPLICATA_IGNORADA
+   pendentes locais: 0
+   registros unicos na nuvem: 2
+
+5) Resultado
+   triagens criadas localmente: 2
+   tentativas de entrega: 3
+   duplicatas bloqueadas: 1
+   triagens unicas na nuvem: 2
+
+PROVA: SUCESSO
+O UUID permitiu reentrega sem duplicar a triagem na nuvem.
