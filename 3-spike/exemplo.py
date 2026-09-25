@@ -1,221 +1,188 @@
-"""Spike do ADR 05: operação offline e sincronização assíncrona idempotente.
-
-O programa simula uma UPA que continua registrando triagens sem internet. Quando a
-rede volta, o primeiro envio chega à nuvem, mas a confirmação se perde. Isso força
-uma reentrega do mesmo evento. A nuvem usa o UUID como chave de idempotência e
-impede que a triagem seja gravada duas vezes.
-
-Compatível com Python 3.12 e somente com biblioteca padrão.
-"""
-
-from __future__ import annotations
-
 import sqlite3
 import uuid
-from dataclasses import dataclass
-from enum import Enum
 
 
-NAMESPACE_SPIKE = uuid.UUID("3f6d9ec7-4d4a-4d52-bf22-df4a9fd35e17")
+# UUID fixo para que o resultado seja sempre igual em toda execução.
+NAMESPACE = uuid.UUID("3f6d9ec7-4d4a-4d52-bf22-df4a9fd35e17")
 
 
-class RedeIndisponivel(RuntimeError):
-    """Indica que a UPA não consegue alcançar a nuvem."""
-
-
-class ConfirmacaoPerdida(RuntimeError):
-    """Indica que a nuvem recebeu o registro, mas o ACK não voltou à UPA."""
-
-
-class ResultadoNuvem(str, Enum):
-    ACEITO = "ACEITO"
-    DUPLICATA_IGNORADA = "DUPLICATA_IGNORADA"
-
-
-@dataclass(frozen=True)
-class Triagem:
-    evento_id: str
-    paciente: str
-    risco: str
-    instante_local: str
-
-
-class BancoLocal:
-    """Banco embarcado que representa o componente Edge da UPA."""
-
-    def __init__(self) -> None:
-        self._conexao = sqlite3.connect(":memory:")
-        self._conexao.row_factory = sqlite3.Row
-        self._conexao.execute(
-            """
-            CREATE TABLE triagens (
-                evento_id TEXT PRIMARY KEY,
-                paciente TEXT NOT NULL,
-                risco TEXT NOT NULL,
-                instante_local TEXT NOT NULL,
-                sincronizado INTEGER NOT NULL DEFAULT 0
-            )
-            """
+def criar_banco_local():
+    banco = sqlite3.connect(":memory:")
+    banco.row_factory = sqlite3.Row
+    banco.execute(
+        """
+        CREATE TABLE triagens (
+            id TEXT PRIMARY KEY,
+            paciente TEXT NOT NULL,
+            risco TEXT NOT NULL,
+            horario TEXT NOT NULL,
+            sincronizado INTEGER NOT NULL DEFAULT 0
         )
-
-    def registrar(self, triagem: Triagem) -> None:
-        self._conexao.execute(
-            """
-            INSERT INTO triagens(evento_id, paciente, risco, instante_local)
-            VALUES (?, ?, ?, ?)
-            """,
-            (
-                triagem.evento_id,
-                triagem.paciente,
-                triagem.risco,
-                triagem.instante_local,
-            ),
-        )
-        self._conexao.commit()
-
-    def pendentes(self) -> list[Triagem]:
-        linhas = self._conexao.execute(
-            """
-            SELECT evento_id, paciente, risco, instante_local
-            FROM triagens
-            WHERE sincronizado = 0
-            ORDER BY instante_local, evento_id
-            """
-        ).fetchall()
-        return [Triagem(**dict(linha)) for linha in linhas]
-
-    def marcar_sincronizada(self, evento_id: str) -> None:
-        self._conexao.execute(
-            "UPDATE triagens SET sincronizado = 1 WHERE evento_id = ?",
-            (evento_id,),
-        )
-        self._conexao.commit()
-
-    def total(self) -> int:
-        return int(self._conexao.execute("SELECT COUNT(*) FROM triagens").fetchone()[0])
-
-
-class NuvemSimulada:
-    """Destino remoto mínimo: rejeita reentregas pelo evento_id."""
-
-    def __init__(self) -> None:
-        self._triagens: dict[str, Triagem] = {}
-        self.tentativas = 0
-        self.duplicatas_bloqueadas = 0
-
-    def receber(self, triagem: Triagem) -> ResultadoNuvem:
-        self.tentativas += 1
-        if triagem.evento_id in self._triagens:
-            self.duplicatas_bloqueadas += 1
-            return ResultadoNuvem.DUPLICATA_IGNORADA
-
-        self._triagens[triagem.evento_id] = triagem
-        return ResultadoNuvem.ACEITO
-
-    def total_unico(self) -> int:
-        return len(self._triagens)
-
-
-class RedeSimulada:
-    """Simula queda de rede e uma perda de confirmação após o primeiro aceite."""
-
-    def __init__(self, nuvem: NuvemSimulada) -> None:
-        self.online = False
-        self._nuvem = nuvem
-        self._perder_proximo_ack = True
-
-    def enviar(self, triagem: Triagem) -> ResultadoNuvem:
-        if not self.online:
-            raise RedeIndisponivel("sem conexão")
-
-        resultado = self._nuvem.receber(triagem)
-        if resultado == ResultadoNuvem.ACEITO and self._perder_proximo_ack:
-            self._perder_proximo_ack = False
-            raise ConfirmacaoPerdida("registro aceito; confirmação perdida")
-        return resultado
-
-
-class Sincronizador:
-    """Worker local que entrega ao menos uma vez e só confirma após receber ACK."""
-
-    def __init__(self, banco: BancoLocal, rede: RedeSimulada) -> None:
-        self._banco = banco
-        self._rede = rede
-
-    def sincronizar(self) -> list[str]:
-        mensagens: list[str] = []
-        for triagem in self._banco.pendentes():
-            try:
-                resultado = self._rede.enviar(triagem)
-            except RedeIndisponivel:
-                mensagens.append(f"{triagem.paciente}: aguardando rede")
-                break
-            except ConfirmacaoPerdida:
-                mensagens.append(f"{triagem.paciente}: ACK perdido; continuará pendente")
-                continue
-
-            self._banco.marcar_sincronizada(triagem.evento_id)
-            mensagens.append(f"{triagem.paciente}: {resultado.value}")
-        return mensagens
-
-
-def criar_triagem(chave: str, paciente: str, risco: str, instante: str) -> Triagem:
-    """Gera UUID determinístico apenas para tornar a saída do spike reproduzível."""
-    evento_id = str(uuid.uuid5(NAMESPACE_SPIKE, chave))
-    return Triagem(evento_id, paciente, risco, instante)
-
-
-def main() -> None:
-    banco = BancoLocal()
-    nuvem = NuvemSimulada()
-    rede = RedeSimulada(nuvem)
-    sincronizador = Sincronizador(banco, rede)
-
-    triagens = [
-        criar_triagem("upa-17/001", "PAC-001", "VERMELHO", "2026-09-25T10:00:00"),
-        criar_triagem("upa-17/002", "PAC-002", "AMARELO", "2026-09-25T10:02:00"),
-    ]
-
-    print("=== SPIKE ADR 05: UPA OFFLINE + SINCRONIZACAO IDEMPOTENTE ===")
-    print("\n1) Internet indisponivel: a triagem continua localmente")
-    for triagem in triagens:
-        banco.registrar(triagem)
-        print(f"   salvo {triagem.paciente} | risco={triagem.risco} | id={triagem.evento_id}")
-    print(f"   pendentes locais: {len(banco.pendentes())}")
-
-    print("\n2) Tentativa ainda offline")
-    for mensagem in sincronizador.sincronizar():
-        print(f"   {mensagem}")
-    print(f"   pendentes locais: {len(banco.pendentes())}")
-    print(f"   registros unicos na nuvem: {nuvem.total_unico()}")
-
-    print("\n3) Internet volta, mas o ACK do primeiro envio se perde")
-    rede.online = True
-    for mensagem in sincronizador.sincronizar():
-        print(f"   {mensagem}")
-    print(f"   pendentes locais: {len(banco.pendentes())}")
-    print(f"   registros unicos na nuvem: {nuvem.total_unico()}")
-
-    print("\n4) Worker tenta novamente")
-    for mensagem in sincronizador.sincronizar():
-        print(f"   {mensagem}")
-    print(f"   pendentes locais: {len(banco.pendentes())}")
-    print(f"   registros unicos na nuvem: {nuvem.total_unico()}")
-
-    print("\n5) Resultado")
-    print(f"   triagens criadas localmente: {banco.total()}")
-    print(f"   tentativas de entrega: {nuvem.tentativas}")
-    print(f"   duplicatas bloqueadas: {nuvem.duplicatas_bloqueadas}")
-    print(f"   triagens unicas na nuvem: {nuvem.total_unico()}")
-
-    sucesso = (
-        banco.total() == 2
-        and len(banco.pendentes()) == 0
-        and nuvem.total_unico() == 2
-        and nuvem.duplicatas_bloqueadas == 1
+        """
     )
-    print(f"\nPROVA: {'SUCESSO' if sucesso else 'FALHA'}")
-    print("O UUID permitiu reentrega sem duplicar a triagem na nuvem.")
+    return banco
+
+
+def criar_id(chave):
+    return str(uuid.uuid5(NAMESPACE, chave))
+
+
+def salvar_triagem(banco, chave, paciente, risco, horario):
+    triagem_id = criar_id(chave)
+    banco.execute(
+        """
+        INSERT INTO triagens (id, paciente, risco, horario)
+        VALUES (?, ?, ?, ?)
+        """,
+        (triagem_id, paciente, risco, horario),
+    )
+    banco.commit()
+    return triagem_id
+
+
+def buscar_pendentes(banco):
+    linhas = banco.execute(
+        """
+        SELECT id, paciente, risco, horario
+        FROM triagens
+        WHERE sincronizado = 0
+        ORDER BY horario
+        """
+    ).fetchall()
+    return [dict(linha) for linha in linhas]
+
+
+def marcar_como_sincronizado(banco, triagem_id):
+    banco.execute(
+        "UPDATE triagens SET sincronizado = 1 WHERE id = ?",
+        (triagem_id,),
+    )
+    banco.commit()
+
+
+def total_local(banco):
+    return banco.execute("SELECT COUNT(*) FROM triagens").fetchone()[0]
+
+
+def enviar_para_nuvem(triagem, nuvem, rede):
+    if not rede["online"]:
+        return "SEM_REDE"
+
+    rede["tentativas"] += 1
+    triagem_id = triagem["id"]
+
+    # Se o mesmo id já chegou antes, não grava de novo.
+    if triagem_id in nuvem:
+        rede["duplicatas"] += 1
+        return "DUPLICATA"
+
+    nuvem[triagem_id] = triagem
+
+    # Simula o caso em que a nuvem recebeu o dado,
+    # mas a confirmação não chegou de volta para a UPA.
+    if rede["perder_proximo_ack"]:
+        rede["perder_proximo_ack"] = False
+        return "ACK_PERDIDO"
+
+    return "OK"
+
+
+def sincronizar(banco, nuvem, rede):
+    mensagens = []
+
+    for triagem in buscar_pendentes(banco):
+        resultado = enviar_para_nuvem(triagem, nuvem, rede)
+        paciente = triagem["paciente"]
+
+        if resultado == "SEM_REDE":
+            mensagens.append(f"{paciente}: sem rede, continua pendente")
+            break
+
+        if resultado == "ACK_PERDIDO":
+            mensagens.append(f"{paciente}: confirmacao perdida, sera reenviado")
+            continue
+
+        if resultado == "DUPLICATA":
+            marcar_como_sincronizado(banco, triagem["id"])
+            mensagens.append(f"{paciente}: duplicata detectada e ignorada")
+            continue
+
+        marcar_como_sincronizado(banco, triagem["id"])
+        mensagens.append(f"{paciente}: sincronizado")
+
+    return mensagens
+
+
+def mostrar_mensagens(mensagens):
+    for mensagem in mensagens:
+        print("  " + mensagem)
+
+
+def main():
+    banco = criar_banco_local()
+    nuvem = {}
+    rede = {
+        "online": False,
+        "perder_proximo_ack": True,
+        "tentativas": 0,
+        "duplicatas": 0,
+    }
+
+    print("=== SPIKE ADR 05 ===")
+    print("\n1) UPA sem internet")
+
+    id1 = salvar_triagem(
+        banco,
+        "upa-17/001",
+        "PAC-001",
+        "VERMELHO",
+        "2026-09-25T10:00:00",
+    )
+    id2 = salvar_triagem(
+        banco,
+        "upa-17/002",
+        "PAC-002",
+        "AMARELO",
+        "2026-09-25T10:02:00",
+    )
+
+    print(f"  PAC-001 salvo localmente | id={id1}")
+    print(f"  PAC-002 salvo localmente | id={id2}")
+    print(f"  pendentes: {len(buscar_pendentes(banco))}")
+
+    print("\n2) Tentativa de sincronizar ainda sem internet")
+    mostrar_mensagens(sincronizar(banco, nuvem, rede))
+    print(f"  registros na nuvem: {len(nuvem)}")
+
+    print("\n3) Internet volta, mas a primeira confirmacao se perde")
+    rede["online"] = True
+    mostrar_mensagens(sincronizar(banco, nuvem, rede))
+    print(f"  pendentes: {len(buscar_pendentes(banco))}")
+    print(f"  registros na nuvem: {len(nuvem)}")
+
+    print("\n4) Nova tentativa de sincronizacao")
+    mostrar_mensagens(sincronizar(banco, nuvem, rede))
+    print(f"  pendentes: {len(buscar_pendentes(banco))}")
+    print(f"  registros na nuvem: {len(nuvem)}")
+
+    print("\n5) Resultado final")
+    print(f"  triagens locais: {total_local(banco)}")
+    print(f"  tentativas de envio: {rede['tentativas']}")
+    print(f"  duplicatas bloqueadas: {rede['duplicatas']}")
+    print(f"  triagens unicas na nuvem: {len(nuvem)}")
+
+    deu_certo = (
+        total_local(banco) == 2
+        and len(buscar_pendentes(banco)) == 0
+        and len(nuvem) == 2
+        and rede["duplicatas"] == 1
+    )
+
+    if deu_certo:
+        print("\nPROVA: SUCESSO")
+        print("A reentrega nao criou uma triagem duplicada.")
+    else:
+        print("\nPROVA: FALHA")
 
 
 if __name__ == "__main__":

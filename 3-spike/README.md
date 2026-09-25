@@ -1,21 +1,30 @@
 # Spike — ADR 05: operação offline e sincronização assíncrona
 
-Este spike prova a decisão registrada no **ADR 05 — “adotar operação local com sincronização assíncrona para UPAs offline”**, identificada no mapa de restrições como a decisão arquitetural mais arriscada. O risco central é permitir que a UPA continue registrando triagens durante uma queda de internet e, depois, sincronize os dados sem criar registros duplicados. O programa reduz esse cenário ao mecanismo essencial: um banco local embarcado, uma rede simulada, um destino em nuvem e um worker de sincronização.
+Este programa foi feito para provar o **ADR 05**, que define que a UPA deve continuar funcionando mesmo quando estiver sem internet e sincronizar os dados depois que a conexão voltar.
 
-O arquivo `exemplo.py` usa somente a biblioteca padrão do Python. O banco local é implementado com `sqlite3`, representando o componente Edge da UPA. Cada triagem recebe um UUID, usado como chave de idempotência no destino em nuvem. Para tornar a execução totalmente reproduzível, o spike usa `uuid.uuid5` com entradas fixas; em produção, a geração poderia usar outro tipo de UUID adequado ao sistema sem alterar o mecanismo demonstrado.
+O ponto que eu quis testar é o seguinte: uma triagem é salva localmente, depois é enviada para a nuvem. Só que pode acontecer de a nuvem receber o registro e a confirmação não voltar para a UPA. Nesse caso, a UPA entende que ainda precisa enviar e tenta novamente. Se não existir um controle de duplicidade, a mesma triagem poderia ficar salva duas vezes.
 
-O cenário força a situação mais perigosa para uma sincronização “ao menos uma vez”: a internet volta, a nuvem aceita a primeira triagem, mas a confirmação (ACK) se perde antes de o Edge marcar o item como sincronizado. Assim, o worker precisa reenviar o mesmo registro. A nuvem reconhece o mesmo UUID, devolve `DUPLICATA_IGNORADA` e não cria uma segunda triagem. Em seguida, os itens restantes são sincronizados normalmente.
+No `exemplo.py`, o banco local da UPA é simulado com `sqlite3` e a nuvem é simulada com um dicionário do Python. Cada triagem recebe um UUID. Quando a mesma triagem é enviada de novo, a nuvem verifica esse UUID e percebe que aquele registro já foi recebido, então ignora a duplicata.
+
+A rede também é simulada. No começo ela está offline. Depois ela volta, mas a confirmação do primeiro envio é perdida de propósito. Isso faz o programa reenviar a primeira triagem e permite testar se a duplicidade é realmente evitada.
 
 ## Como rodar
 
-A partir desta pasta, com **Python 3.12**:
+Na pasta `3-spike`, usando Python 3.12:
 
 ```bash
 python3 exemplo.py
 ```
 
-A saída deve ser exatamente a registrada em `saida-esperada.txt`. O resultado final esperado é `PROVA: SUCESSO`, com duas triagens criadas localmente, duas triagens únicas na nuvem e uma duplicata bloqueada durante a reentrega.
+A saída deve ser igual ao arquivo `saida-esperada.txt`. No final deve aparecer:
 
-## O que aconteceria se a decisão estivesse errada
+```text
+PROVA: SUCESSO
+A reentrega nao criou uma triagem duplicada.
+```
 
-Se o UUID não fosse preservado entre as tentativas, ou se a nuvem não tratasse esse UUID como chave de idempotência, a perda do ACK faria o worker reenviar a triagem e o destino a gravaria novamente. Nesse caso, duas triagens locais poderiam virar três registros remotos, provando que a estratégia não é segura para as quedas de rede descritas no ADR. Da mesma forma, se não existisse armazenamento local, a indisponibilidade da rede impediria a triagem ou causaria perda de dados. O spike, portanto, testa diretamente os dois pressupostos essenciais do ADR 05: **continuidade offline** e **sincronização idempotente após reconexão**.
+## Se a decisão estivesse errada
+
+Se o sistema não mantivesse o mesmo UUID no reenvio, ou se a nuvem não verificasse esse UUID antes de salvar, a primeira triagem seria gravada duas vezes. Nesse exemplo, teríamos duas triagens criadas na UPA, mas três registros na nuvem. Isso mostraria que a solução não é segura para uma situação real de queda de conexão.
+
+Também seria um problema se a UPA dependesse da internet para registrar a triagem, porque durante uma queda de rede o atendimento poderia parar ou os dados poderiam ser perdidos. Por isso o spike testa justamente as duas partes mais importantes do ADR: salvar localmente e sincronizar sem duplicar.
